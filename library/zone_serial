@@ -1,0 +1,220 @@
+#!/usr/bin/python
+
+# Copyright (c) 2014 Pawel Rozlach, Brainly.com sp. z o.o.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy of
+# the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License.
+
+import datetime
+import errno
+
+from ansible.module_utils.basic import *
+
+DOCUMENTATION = """
+---
+module: zone_serial
+version_added: 1.7
+short_description: Automatic incrementing of zone's serial numbers.
+description:
+    - The zone_serial module takes care of keeping track of zone's serial \
+    and incrementing it in case the zone itself changes. The current value \
+    of the serial is stored on the server in "<param:dest>.serial" \
+    file. Each time the module is called, it takes the zone "template" \
+    located in "<param:src>" file and substitutes first \
+    occurence of "__INTERNAL_ZONE_PLACEHOLDER" string with old serial. \
+    If there are any changes detected, then a new serial is calculated \
+    and there is one more substitution. Resulting zone text is then \
+    saved into "<param:dest>" file.
+    - The algorithm used for calculating new serial for zone is a bit \
+    tricky. First, if the serial is provided using 'serial' parameter, \
+    then depending if it is in the past or not it is either ignored \
+    (YYYMMDDxx points into the past) or it overwrites the values stored \
+    in '*.serial' file and/or calculated ones if '*.serial' file is not \
+    present. If the serial parameter is not specified then the plugin \
+    checks if the current serial of the zone is available in \
+    "<param:dest>.serial". If so - it simply bumps, if not - it calculates \
+    a new one basing on current year, time and month: YYYYMMDD00.
+options:
+    src:
+        description:
+            - path to the input zone file on the destination server with \
+            "__INTERNAL_ZONE_PLACEHOLDER" placeholder for the zone's serial.
+        required: true
+        default: null
+        aliases: ['src_template',]
+    dest:
+        description:
+            - path on the target server where final zone text should be saved.
+        required: true
+        default: null
+        aliases: ['zone_file',]
+    serial:
+        description:
+            - serial to use instead of the value stored in "<param:dest>.serial"\
+            file. Will be ignored if it points into the past.
+        required: false
+        default: null
+extends_documentation_fragment: utilities
+author: Pawel Rozlach
+notes:
+    - this is an internal module and is an integral part of DNS automation.
+"""
+
+SERIAL_PLACEHOLDER = "__INTERNAL_ZONE_PLACEHOLDER"
+
+
+def calculate_serial(module, old_serial=None):
+    """Zone serial number generator.
+
+    This function either creates a new zone serial basing on the time/date
+    or bumps provided one. Additionally there is some sanity checking, in
+    case i.e. there are more than 100 changes in one day.
+
+    Args:
+        module: an instance of the ansible module this function is called
+            by.
+        old_serial: If not None, the value is used to calculate new serial.
+            Otherwise, function uses current time and date.
+
+    Returns:
+        A 10-digit integere conforming to YYYYMMDDxx serial format.
+    """
+
+    prefix_str = '{0:%Y%m%d}'.format(datetime.date.today())
+    prefix_int = int(prefix_str)
+
+    if old_serial is None:
+        return prefix_int * 100
+
+    oldprefix_int = old_serial//100
+    oldsuffix_int = old_serial % 100
+
+    if oldprefix_int < prefix_int:
+        return prefix_int * 100
+
+    if oldprefix_int > prefix_int:
+        module.fail_json(msg="Current serial is too far in the future",
+                         base_serial=old_serial)
+
+    # Change occured on the same day: oldprefix_int == prefix_int
+    if oldsuffix_int < 99:
+        return oldprefix_int * 100 + oldsuffix_int+1
+    else:
+        module.fail_json(msg="Number of allowed changes per day" +
+                         " (100) has been exhausted. Bumping the" +
+                         " serial would require bummping the day" +
+                         " as well.",
+                         base_serial=old_serial)
+        # In case we want to bump date anyway:
+        # return (oldprefix_int+1)*100 + oldsuffix_int+1
+
+
+def main():
+    """Main body of zone_serial module
+
+    This module takes care of bumping zone's serial each time it changes.
+    It achieves that by storing current value of the serial on the destination
+    server in a file:
+
+        <zone-name>.serial
+
+    The stored serial is then calculated to current time and day and substitues
+    the placeholder defined in SERIAL_PLACEHOLDER constant. Please check module's
+    documentation for detailed info on module's parameters and operation.
+    """
+    module = AnsibleModule(
+        argument_spec=dict(
+            src=dict(required=True, type='str', aliases=['src_template', ]),
+            dest=dict(required=True, type='str', aliases=['zone_file', ]),
+            serial=dict(required=False, default=None, type='int'),
+        ),
+        supports_check_mode=True
+    )
+
+    desired_serial = module.params['serial']
+    src = module.params['src']
+    dest = module.params['dest']
+
+    # Fetch the zone file with serial to fill in:
+    try:
+        with open(src, 'r') as fh:
+            src_data = fh.read()
+    except IOError as e:
+        module.fail_json(src=src,
+                         msg="Failed to open zone file to process: " + str(e))
+
+    # Fetch current zone file:
+    try:
+        with open(dest, 'r') as fh:
+            dest_data = fh.read()
+    except IOError as e:
+        if e.errno == errno.ENOENT:
+            dest_data = ""
+            if module.check_mode:
+                module.exit_json(changed=True, msg="Destination file does not exists")
+        else:
+            module.fail_json(dest=dst,
+                             msg="Failed to open processed zone's " +
+                                 "destination file: " + str(e))
+
+    serial_file = dest + '.serial'
+
+    # Determine current value of serial:
+    try:
+        with open(serial_file, 'r') as fh:
+            cur_serial = int(fh.read())
+    except IOError as e:
+        if e.errno != errno.ENOENT:
+            module.fail_json(error=str(e),
+                             msg="Failed to open file containing current" +
+                                 " value of serial.")
+        else:
+            cur_serial = None
+    except ValueError as e:
+        module.fail_json(file=serial_file,
+                         msg="File does not contain valid serial.")
+
+    # Here is the place where module's logic is:
+    # Cur_serial == None is handled by the calculate_serial function itself
+    tmp = calculate_serial(module, cur_serial)
+
+    if desired_serial is None or desired_serial < tmp:
+        # There is no data on current serial, and the specified one
+        # is outdated. Lets assign it a new one:
+        new_serial = tmp
+    else:
+        new_serial = desired_serial
+
+    if cur_serial is not None:
+        formatted_data = src_data.replace(SERIAL_PLACEHOLDER, str(cur_serial), 1)
+
+        if dest_data == formatted_data:
+            module.exit_json(changed=False, msg="There are no changes to dst file.")
+
+    # If reached, means that zone file has changed or we do not know current
+    # value of the serial:
+    formatted_data = src_data.replace(SERIAL_PLACEHOLDER, str(new_serial), 1)
+
+    try:
+        with open(dest, 'w') as fh:
+            fh.write(formatted_data)
+        with open(serial_file, 'w') as fh:
+            fh.write(str(new_serial))
+    except IOError as e:
+        module.fail_json(error=str(e),
+                         zone_file=dest,
+                         serial_file=serial_file,
+                         msg="Failed to write reformatted zone, or store serial")
+
+    module.exit_json(changed=True, msg="Zone was written")
+
+main()
