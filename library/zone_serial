@@ -69,7 +69,7 @@ notes:
     - this is an internal module and is an integral part of DNS automation.
 """
 
-SERIAL_PLACEHOLDER = "__INTERNAL_ZONE_PLACEHOLDER"
+SERIAL_PLACEHOLDER = "1970010100"
 
 
 def calculate_serial(module, old_serial=None):
