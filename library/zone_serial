@@ -89,7 +89,7 @@ def calculate_serial(module, old_serial=None):
         A 10-digit integere conforming to YYYYMMDDxx serial format.
     """
 
-    prefix_str = '{0:%Y%m%d}'.format(datetime.date.today())
+    prefix_str = datetime.date.today().strftime("%Y%m%d")
     prefix_int = int(prefix_str)
 
     if old_serial is None:
@@ -146,17 +146,19 @@ def main():
 
     # Fetch the zone file with serial to fill in:
     try:
-        with open(src, 'r') as fh:
-            src_data = fh.read()
-    except IOError as e:
+        fh = open(src, 'r')
+        src_data = fh.read()
+        fh.close()
+    except IOError, e:
         module.fail_json(src=src,
                          msg="Failed to open zone file to process: " + str(e))
 
     # Fetch current zone file:
     try:
-        with open(dest, 'r') as fh:
-            dest_data = fh.read()
-    except IOError as e:
+        fh = open(dest, 'r')
+        dest_data = fh.read()
+        fh.close()
+    except IOError, e:
         if e.errno == errno.ENOENT:
             dest_data = ""
             if module.check_mode:
@@ -170,16 +172,17 @@ def main():
 
     # Determine current value of serial:
     try:
-        with open(serial_file, 'r') as fh:
-            cur_serial = int(fh.read())
-    except IOError as e:
+        fh =open(serial_file, 'r')
+        cur_serial = int(fh.read())
+        fh.close()
+    except IOError, e:
         if e.errno != errno.ENOENT:
             module.fail_json(error=str(e),
                              msg="Failed to open file containing current" +
                                  " value of serial.")
         else:
             cur_serial = None
-    except ValueError as e:
+    except ValueError, e:
         module.fail_json(file=serial_file,
                          msg="File does not contain valid serial.")
 
@@ -205,11 +208,13 @@ def main():
     formatted_data = src_data.replace(SERIAL_PLACEHOLDER, str(new_serial), 1)
 
     try:
-        with open(dest, 'w') as fh:
-            fh.write(formatted_data)
-        with open(serial_file, 'w') as fh:
-            fh.write(str(new_serial))
-    except IOError as e:
+        fh = open(dest, 'w')
+        fh.write(formatted_data)
+        fh.close()
+        fh = open(serial_file, 'w')
+        fh.write(str(new_serial))
+        fh.close()
+    except IOError, e:
         module.fail_json(error=str(e),
                          zone_file=dest,
                          serial_file=serial_file,
